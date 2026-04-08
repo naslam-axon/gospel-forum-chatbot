@@ -21,8 +21,16 @@ A Next.js chatbot for Gospel Forum Stuttgart, one of Germany's largest evangelic
 - **Single endpoint:** `POST /api/chat` at `src/app/api/chat/route.ts`
 - **Anthropic SDK** — uses `client.messages.stream()` for streaming responses
 - **Model:** `claude-haiku-4-5-20251001`
-- **System Prompt** contains a strict knowledge base — the bot must ONLY answer from this data
+- **System Prompt** contains a strict website knowledge base — the bot must ONLY answer from this data and the RAG context
 - **SSE format** — streams `data: {"text": "..."}` chunks, ends with `data: [DONE]`
+
+### RAG (Retrieval-Augmented Generation)
+
+- **Vector store:** Supabase Postgres + `pgvector` (table `documents`, 1024-dim embeddings, HNSW cosine index, `match_documents` SQL function)
+- **Embeddings:** Voyage AI `voyage-3` via direct REST `fetch` (helper at `src/lib/voyage.ts` — `embedQuery` / `embedDocuments`). The `voyageai` npm package is intentionally NOT used (broken ESM in Next.js)
+- **Retrieval flow:** on each request, embed the latest user message (`input_type: "query"`), call `match_documents` (top 5, threshold 0.5), append the matched chunks as a `=== KONTEXT AUS GLAUBE 101 ===` block to the last user message before sending to Claude
+- **Failure mode:** if Voyage or Supabase is unreachable, the request continues without RAG context (logged via `[RAG]` prefix)
+- **Knowledge source:** "Glaube 101" PDF by Markus Wenz, ingested via `pnpm ingest` (`scripts/ingest-pdf.ts`). The PDF lives in `data/glaube-101.pdf` (gitignored)
 
 ### State Management
 
@@ -45,7 +53,10 @@ The bot operates under strict rules defined in the system prompt (`src/app/api/c
 
 | File | Purpose |
 |---|---|
-| `src/app/api/chat/route.ts` | API route with Anthropic SDK, system prompt, knowledge base |
+| `src/app/api/chat/route.ts` | API route with Anthropic SDK, system prompt, RAG retrieval, website knowledge base |
+| `src/lib/voyage.ts` | Voyage AI REST client (`embedQuery`, `embedDocuments`) — direct fetch, no SDK |
+| `scripts/ingest-pdf.ts` | One-shot PDF ingestion: parse → clean → chunk → embed → upsert into Supabase |
+| `scripts/supabase-schema.sql` | Supabase schema: pgvector, `documents` table, HNSW index, `match_documents` function |
 | `src/hooks/use-chat.ts` | Client-side chat state, fetch + SSE streaming logic |
 | `src/lib/chat-data.ts` | TypeScript types (`Message`), quick chip definitions |
 | `src/components/chat-area.tsx` | Scrollable message container with auto-scroll |
@@ -69,6 +80,9 @@ The bot operates under strict rules defined in the system prompt (`src/app/api/c
 | Variable | Required | Description |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | Yes | Anthropic API key for Claude. Set in `.env.local` (never commit) |
+| `SUPABASE_URL` | Yes | Supabase project URL |
+| `SUPABASE_SERVICE_ROLE_KEY` | Yes | Supabase service role (secret) key — server-side only |
+| `VOYAGE_API_KEY` | Yes | Voyage AI key for `voyage-3` embeddings |
 
 ## Commands
 
@@ -77,4 +91,5 @@ pnpm dev        # Start dev server (Turbopack)
 pnpm build      # Production build
 pnpm start      # Start production server
 pnpm lint       # Run ESLint
+pnpm ingest     # Re-ingest data/glaube-101.pdf into Supabase (chunks + embeddings)
 ```

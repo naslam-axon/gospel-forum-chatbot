@@ -1,6 +1,64 @@
 import Anthropic from '@anthropic-ai/sdk'
+import { createClient } from '@supabase/supabase-js'
+import { embedQuery } from '@/lib/voyage'
+
+const supabase =
+  process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY
+    ? createClient(
+        process.env.SUPABASE_URL,
+        process.env.SUPABASE_SERVICE_ROLE_KEY,
+        { auth: { persistSession: false } }
+      )
+    : null
+
+type MatchedDoc = {
+  id: number
+  content: string
+  metadata: { chapter?: string; section?: string; source?: string }
+  similarity: number
+}
+
+async function retrieveContext(query: string): Promise<MatchedDoc[]> {
+  if (!supabase) return []
+  let embedding: number[]
+  try {
+    embedding = await embedQuery(query)
+  } catch (err) {
+    console.error('[RAG] Voyage unreachable:', err)
+    return []
+  }
+  try {
+    const { data, error } = await supabase.rpc('match_documents', {
+      query_embedding: embedding,
+      match_count: 5,
+      match_threshold: 0.5,
+    })
+    if (error) {
+      console.error('[RAG] Supabase match_documents error:', error.message)
+      return []
+    }
+    return (data ?? []) as MatchedDoc[]
+  } catch (err) {
+    console.error('[RAG] Supabase unreachable:', err)
+    return []
+  }
+}
+
+function buildContextBlock(docs: MatchedDoc[]): string {
+  if (docs.length === 0) return ''
+  const parts = docs.map((d) => {
+    const head = [d.metadata?.chapter, d.metadata?.section]
+      .filter(Boolean)
+      .join(' / ')
+    return head ? `[${head}]\n${d.content}` : d.content
+  })
+  return `\n\n=== KONTEXT AUS GLAUBE 101 ===\n${parts.join('\n---\n')}\n=== ENDE KONTEXT ===\n`
+}
 
 const SYSTEM_PROMPT = `Du bist der digitale Assistent des Gospel Forum Stuttgart — einer großen Freikirche in Stuttgart-Feuerbach. Du beantwortest Fragen von Gemeindemitgliedern und Besuchern.
+
+ZUSÄTZLICHER KONTEXT:
+Bei jeder Frage erhältst du ggf. relevante Auszüge aus dem theologischen Lehrbuch "Glaube 101" von Markus Wenz (eingefügt in der letzten Nutzer-Nachricht unter "=== KONTEXT AUS GLAUBE 101 ==="). Wenn die Frage durch diese Auszüge beantwortet werden kann, nutze sie als primäre Quelle und antworte inhaltlich daraus. Wenn KEIN solcher Kontext vorhanden ist oder er nicht zur Frage passt, nutze ausschließlich die untenstehende Webseiten-Wissensdatenbank. Erfinde nichts dazu.
 
 STRENGE REGELN:
 - Du darfst AUSSCHLIESSLICH auf Basis der untenstehenden Wissensdatenbank antworten.
@@ -102,6 +160,26 @@ export async function POST(request: Request) {
       role: msg.role as 'user' | 'assistant',
       content: msg.content,
     }))
+
+    // RAG: retrieve context for the latest user message
+    const lastUser = [...anthropicMessages].reverse().find((m) => m.role === 'user')
+    if (lastUser) {
+      const docs = await retrieveContext(lastUser.content)
+      console.log(
+        `[RAG] matched ${docs.length} chunks; top similarities: ${docs
+          .map((d) => d.similarity.toFixed(3))
+          .join(', ')}`
+      )
+      const ctx = buildContextBlock(docs)
+      if (ctx) {
+        // Append context to the last user message so Claude sees it
+        const idx = anthropicMessages.lastIndexOf(lastUser)
+        anthropicMessages[idx] = {
+          ...lastUser,
+          content: `${lastUser.content}${ctx}`,
+        }
+      }
+    }
 
     const stream = await client.messages.stream({
       model: 'claude-haiku-4-5-20251001',

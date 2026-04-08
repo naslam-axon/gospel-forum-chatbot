@@ -8,6 +8,7 @@ Der digitale Assistent des Gospel Forum Stuttgart. Ein Chat-Interface, das Frage
 - **Sprache:** TypeScript
 - **Styling:** Tailwind CSS 4
 - **KI:** Claude API (Haiku 4.5) via Anthropic SDK
+- **RAG:** Supabase (pgvector) + Voyage AI Embeddings (`voyage-3`)
 - **Streaming:** Server-Sent Events (SSE) für Echtzeit-Antworten
 - **Package Manager:** pnpm
 - **Fonts:** Inter + Lora (Google Fonts)
@@ -18,6 +19,7 @@ Der digitale Assistent des Gospel Forum Stuttgart. Ein Chat-Interface, das Frage
 - **Chat-UI** — Moderne, responsive Chat-Oberfläche im Gospel Forum Branding
 - **Streaming-Antworten** — Antworten erscheinen Token für Token in Echtzeit
 - **Strikte Wissensdatenbank** — Der Bot antwortet ausschließlich auf Basis geprüfter Inhalte
+- **RAG mit "Glaube 101"** — Theologische Fragen werden über Vector Search (Supabase pgvector + Voyage Embeddings) aus dem Lehrbuch von Markus Wenz beantwortet
 - **Quick-Chips** — Vordefinierte Fragen auf dem Willkommensscreen für schnellen Einstieg
 - **Follow-up Vorschläge** — Kontextbezogene Folgefragen nach jeder Antwort
 - **Mobile-first** — Optimiert für Smartphones, funktioniert auf allen Geräten
@@ -31,6 +33,8 @@ Der digitale Assistent des Gospel Forum Stuttgart. Ein Chat-Interface, das Frage
 - Node.js 18+
 - pnpm (`npm install -g pnpm`)
 - Anthropic API Key ([console.anthropic.com](https://console.anthropic.com))
+- Supabase Projekt ([supabase.com](https://supabase.com)) mit aktivierter `pgvector` Extension
+- Voyage AI Key ([dashboard.voyageai.com](https://dashboard.voyageai.com))
 
 ### Installation
 
@@ -48,11 +52,28 @@ Erstelle eine `.env.local` Datei im Projektroot:
 cp .env.example .env.local
 ```
 
-Trage deinen Anthropic API Key ein:
+Trage die Keys ein:
 
 ```
 ANTHROPIC_API_KEY=sk-ant-your-key-here
+SUPABASE_URL=https://xxxxx.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=sb_secret_...
+VOYAGE_API_KEY=pa-...
 ```
+
+### Supabase Schema einrichten
+
+Im Supabase SQL Editor den Inhalt von `scripts/supabase-schema.sql` ausführen. Das aktiviert `pgvector`, erstellt die `documents` Tabelle (1024-dim Embeddings, HNSW Index) und die `match_documents` SQL Function.
+
+### "Glaube 101" PDF ingesten
+
+Die PDF unter `data/glaube-101.pdf` ablegen (gitignored), dann:
+
+```bash
+pnpm ingest
+```
+
+Das Skript parsed die PDF, chunked sie semantisch, erstellt Voyage Embeddings und speichert alles in Supabase. Re-runs sind sicher — bestehende Einträge mit `source = "Glaube 101 - Markus Wenz"` werden vorher gelöscht.
 
 ### Entwicklung starten
 
@@ -103,6 +124,9 @@ src/
 | Variable | Beschreibung | Erforderlich |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | Anthropic API Key für Claude | Ja |
+| `SUPABASE_URL` | Supabase Projekt-URL | Ja |
+| `SUPABASE_SERVICE_ROLE_KEY` | Supabase Service Role (Secret) Key — nur server-side | Ja |
+| `VOYAGE_API_KEY` | Voyage AI Key für `voyage-3` Embeddings | Ja |
 
 ## Wissensdatenbank erweitern
 
@@ -130,9 +154,19 @@ Hier die Informationen zum neuen Bereich...
 - Links immer im Format `gospel-forum.de/seite` angeben
 - Daten regelmäßig aktualisieren (Termine, Events, etc.)
 
+## RAG-Architektur
+
+Bei jeder Anfrage:
+
+1. Letzte Nutzer-Nachricht wird via Voyage AI (`voyage-3`, `input_type: "query"`) embedded
+2. Supabase RPC `match_documents` liefert die Top-5 ähnlichsten Chunks (Cosine Similarity, Threshold 0.5)
+3. Die Chunks werden als `=== KONTEXT AUS GLAUBE 101 ===` Block an die User-Nachricht angehängt
+4. Claude erhält System Prompt (Webseiten-KB) + Nachricht (mit RAG-Kontext) und antwortet streamend
+
+Fällt Voyage oder Supabase aus, läuft die Anfrage ohne RAG-Kontext weiter (nur Webseiten-KB). Der Voyage-Aufruf nutzt `src/lib/voyage.ts` (direkter `fetch`, kein npm SDK) wegen ESM-Inkompatibilitäten des `voyageai` Pakets in Next.js.
+
 ## Geplante Features
 
-- **RAG mit PDF-Upload** — Automatisches Einlesen von Gemeinde-Dokumenten (Flyer, Berichte, etc.) als Wissensbasis
 - **Salesforce Integration** — Anbindung an das CRM für personalisierte Antworten und Kontaktweiterleitung
 - **Mehrsprachigkeit** — Automatische Spracherkennung und Antworten in der Sprache des Nutzers
 - **Admin-Dashboard** — Verwaltung der Wissensdatenbank über eine Web-Oberfläche
